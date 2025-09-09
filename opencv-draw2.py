@@ -20,6 +20,7 @@ WIDER_FIST_RANGE = 400
 WIDER_PALM_RANGE = 350
 MAX_PHYSICS_SPEED = 40
 GRAVITY = np.array([0.0, 0.6])
+MAX_LOGO_DIMENSION = 100 # Max width or height for spawned logos
 
 # --- Global State & Buffers ---
 # State
@@ -28,7 +29,6 @@ fist_menu_active, highlighted_dial_option = False, -1
 frame_count = 0
 
 # A centralized dictionary to hold all reusable image buffers for effects.
-# This prevents constant memory allocation/deallocation, which is key for long-term stability.
 EFFECT_BUFFERS = {
     "ghosting_trail": None,
     "ascii": None,
@@ -49,6 +49,7 @@ dial_options = [
 ]
 physics_objects = []
 left_hand_grab, right_hand_grab = None, None
+LOGO_IMAGES = [] # List to hold pre-loaded and resized logo images
 
 # --- MediaPipe Initialization ---
 mp_drawing = mp.solutions.drawing_utils
@@ -123,15 +124,32 @@ def get_buffer(name, shape, dtype=np.uint8):
     return EFFECT_BUFFERS[name]
 
 # --- Physics Sandbox ---
-def spawn_physics_object(shape='circle'):
+def spawn_physics_object(shape='circle', image_data=None):
+    """Spawns a physics object, which can be a standard shape or a custom image."""
     if len(physics_objects) >= MAX_PHYSICS_OBJECTS:
         physics_objects.pop(0) # Remove oldest object
 
     x = random.randint(100, 1180)
     color = (random.randint(100, 255), random.randint(100, 255), random.randint(100, 255))
-    obj = {'pos': np.array([float(x), 50.0]), 'prev_pos': np.array([float(x), 50.0]),
-           'vel': np.array([random.uniform(-2, 2), 0.0]), 'size': random.randint(20, 40),
-           'shape': shape, 'color': color, 'held_by': None}
+    
+    # Base object properties
+    obj = {'pos': np.array([float(x), 50.0]), 
+           'prev_pos': np.array([float(x), 50.0]),
+           'vel': np.array([random.uniform(-2, 2), 0.0]), 
+           'shape': shape, 
+           'color': color, 
+           'held_by': None,
+           'image': None}
+
+    # Set properties based on whether it's an image or a shape
+    if shape == 'image' and image_data is not None:
+        obj['image'] = image_data
+        # Use the largest dimension for collision size
+        obj['size'] = max(image_data.shape[0], image_data.shape[1]) // 2
+    else:
+        # Default size for geometric shapes
+        obj['size'] = random.randint(20, 40)
+        
     physics_objects.append(obj)
 
 def update_and_draw_physics(image, results, gestures):
@@ -196,7 +214,7 @@ def update_and_draw_physics(image, results, gestures):
         obj['prev_pos'] = obj['pos'].copy()
         pos_int = obj['pos'].astype(np.int32)
         
-        # Drawing logic for shapes
+        # --- Drawing Logic ---
         shape_drawers = {
             'circle': lambda: cv2.circle(image, tuple(pos_int), obj['size'], obj['color'], -1),
             'square': lambda: cv2.rectangle(image, (pos_int[0]-obj['size'], pos_int[1]-obj['size']), (pos_int[0]+obj['size'], pos_int[1]+obj['size']), obj['color'], -1),
@@ -211,6 +229,29 @@ def update_and_draw_physics(image, results, gestures):
             s_outer, s_inner = obj['size'], obj['size'] // 2
             points = np.array([[int(pos_int[0] + (s_outer if i%2==0 else s_inner) * math.cos(i*math.pi/5 - math.pi/2)), int(pos_int[1] + (s_outer if i%2==0 else s_inner) * math.sin(i*math.pi/5 - math.pi/2))] for i in range(10)], np.int32)
             cv2.fillPoly(image, [points], obj['color'])
+        # --- NEW: Drawing logic for image objects ---
+        elif obj['shape'] == 'image' and obj.get('image') is not None:
+            img_to_draw = obj['image']
+            img_h, img_w, _ = img_to_draw.shape
+            
+            # Calculate top-left corner for overlay
+            x1, y1 = pos_int[0] - img_w // 2, pos_int[1] - img_h // 2
+            x2, y2 = x1 + img_w, y1 + img_h
+
+            # Ensure the object is on screen before trying to draw
+            if x1 < w and y1 < h and x2 > 0 and y2 > 0:
+                # Get the region of interest (ROI) on the main image
+                roi = image[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+                
+                # Handle alpha channel for transparency
+                alpha = img_to_draw[:, :, 3] / 255.0
+                alpha = alpha[:roi.shape[0], :roi.shape[1]] # Match alpha size to ROI
+                
+                # Combine the logo and the ROI
+                for c in range(0, 3):
+                    img_c = img_to_draw[:roi.shape[0], :roi.shape[1], c]
+                    roi[:, :, c] = (img_c * alpha) + (roi[:, :, c] * (1.0 - alpha))
+
 
 # --- Effects Functions ---
 def draw_geometric_orb_effect(image, hand_landmarks):
@@ -384,7 +425,7 @@ def draw_all_landmarks(image, results):
 
 # --- Main Application Loop ---
 def main():
-    global click_cooldown, frame_count
+    global click_cooldown, frame_count, LOGO_IMAGES
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Error: Could not open video stream.")
@@ -395,6 +436,30 @@ def main():
     cv2.namedWindow('Interactive Gesture Control', cv2.WINDOW_NORMAL)
     cv2.setWindowProperty('Interactive Gesture Control', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
+    # --- NEW: Pre-load and resize all logo images efficiently ---
+    print("Loading logo images...")
+    for i in range(1, 9):
+        try:
+            logo_path = f'logo_{i}.png'
+            logo = cv2.imread(logo_path, cv2.IMREAD_UNCHANGED)
+            if logo is None:
+                raise FileNotFoundError(f"Image not found at {logo_path}")
+            if logo.shape[2] != 4:
+                print(f"Warning: logo_{i}.png does not have an alpha channel. Adding one.")
+                logo = cv2.cvtColor(logo, cv2.COLOR_BGR2BGRA)
+
+            # Resize while preserving aspect ratio
+            h, w = logo.shape[:2]
+            scale = MAX_LOGO_DIMENSION /  max(h, w)
+            new_w, new_h = int(w * scale), int(h * scale)
+            resized_logo = cv2.resize(logo, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            
+            LOGO_IMAGES.append(resized_logo)
+            print(f"-> Successfully loaded and resized logo_{i}.png")
+        except Exception as e:
+            print(f"Warning: Could not load 'logo_{i}.png'. {e}")
+            LOGO_IMAGES.append(None) # Append placeholder if load fails
+    
     try:
         logo = cv2.imread('logo.png', cv2.IMREAD_UNCHANGED)
         logo_resized = cv2.resize(logo, (200, int(200 * logo.shape[0] / logo.shape[1]))) if logo is not None else None
@@ -435,19 +500,15 @@ def main():
                 if face_buttons[0]["is_on"]: display_image = apply_cartoon_effect(display_image)
                 if face_buttons[1]["is_on"]: display_image = apply_ascii_art_effect(display_image)
                 
-                # FIX: Corrected ghosting effect logic for proper initialization
                 if face_buttons[2]["is_on"]:
                     ghosting_trail = EFFECT_BUFFERS.get("ghosting_trail")
-                    # If effect was just turned on, initialize trail with the current frame
                     if ghosting_trail is None or ghosting_trail.shape != display_image.shape:
                         EFFECT_BUFFERS["ghosting_trail"] = display_image.astype(np.float32)
                     else:
-                        # Otherwise, blend the current frame into the existing trail
                         current_frame_float = display_image.astype(np.float32)
                         EFFECT_BUFFERS["ghosting_trail"] = cv2.addWeighted(current_frame_float, 0.1, ghosting_trail, 0.9, 0)
                     display_image = EFFECT_BUFFERS["ghosting_trail"].astype(np.uint8)
                 else:
-                    # Reset the trail when the effect is off
                     EFFECT_BUFFERS["ghosting_trail"] = None
 
             # --- Physics & UI Rendering ---
@@ -463,7 +524,6 @@ def main():
             
             if logo_resized is not None:
                 h, w, _ = display_image.shape
-                # Simple overlay logic assuming RGBA logo
                 if logo_resized.shape[2] == 4:
                     overlay_h, overlay_w, _ = logo_resized.shape
                     roi = display_image[20:20+overlay_h, w-overlay_w-20:w-20]
@@ -471,21 +531,13 @@ def main():
                     for c in range(0,3):
                         roi[:,:,c] = logo_resized[:,:,c] * alpha + roi[:,:,c] * (1.0 - alpha)
 
-            # --- UPDATED: Text with Outline and Emojis ---
-            text_to_display = "PRESS: b/s/t/x: spawn | c: clear | q: quit"
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.8
-            font_thickness = 2
-            outline_thickness = 4 # Thicker for outline
-            text_color = (255, 255, 255) # White text
-            outline_color = (0, 0, 0) # Black outline
+            # --- UPDATED: Text with Outline ---
+            text_to_display = "PRESS: b/s/t/x/1-8: spawn | c: clear | q: quit"
+            font, font_scale, font_thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2
+            outline_thickness, text_color, outline_color = 4, (255, 255, 255), (0, 0, 0)
             text_pos = (20, 40)
-
-            # Draw outline first (thicker black text)
             cv2.putText(display_image, text_to_display, text_pos, font, font_scale, outline_color, outline_thickness, cv2.LINE_AA)
-            # Draw main text second (thinner white text)
             cv2.putText(display_image, text_to_display, text_pos, font, font_scale, text_color, font_thickness, cv2.LINE_AA)
-            # --- END UPDATED TEXT ---
 
             cv2.imshow('Interactive Gesture Control', display_image)
             
@@ -497,15 +549,18 @@ def main():
             elif key == ord('t'): spawn_physics_object('triangle')
             elif key == ord('x'): spawn_physics_object('star')
             elif key == ord('c'): physics_objects.clear()
+            # --- NEW: Handle number keys for spawning logos ---
+            elif ord('1') <= key <= ord('8'):
+                logo_index = key - ord('1')
+                if logo_index < len(LOGO_IMAGES) and LOGO_IMAGES[logo_index] is not None:
+                    spawn_physics_object(shape='image', image_data=LOGO_IMAGES[logo_index])
             
-            # Proactive garbage collection for long-term stability
             if frame_count % 1000 == 0:
                 gc.collect()
 
     except Exception as e:
         print(f"An error occurred: {e}")
     finally:
-        # This block ensures cleanup happens even if an error occurs
         print("Shutting down...")
         holistic_model.close()
         cap.release()
