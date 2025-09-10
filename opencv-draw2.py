@@ -42,6 +42,7 @@ face_buttons = [
     {"label": "Cartoon", "is_on": False, "center": (0, 0)},
     {"label": "ASCII", "is_on": False, "center": (0, 0)},
     {"label": "Ghosting", "is_on": False, "center": (0, 0)},
+    {"label": "Thermal", "is_on": False, "center": (0, 0)},
 ]
 dial_options = [
     {"label": "Normal Range", "is_on": True},
@@ -64,21 +65,17 @@ def get_gesture_state(hand_landmarks):
             "is_open_palm": False, "is_fist": False
         }
 
-    # Helper to check if fingers are extended (tip is above pip/mcp)
     def is_finger_extended(tip_idx, pip_idx):
         return hand_landmarks.landmark[tip_idx].y < hand_landmarks.landmark[pip_idx].y
 
-    # Helper to check if fingers are curled (tip is below mcp)
     def is_finger_curled(tip_idx, mcp_idx):
         return hand_landmarks.landmark[tip_idx].y > hand_landmarks.landmark[mcp_idx].y
 
-    # Pinching
     is_pinching_val = math.hypot(
         hand_landmarks.landmark[mp_holistic.HandLandmark.THUMB_TIP].x - hand_landmarks.landmark[mp_holistic.HandLandmark.INDEX_FINGER_TIP].x,
         hand_landmarks.landmark[mp_holistic.HandLandmark.THUMB_TIP].y - hand_landmarks.landmark[mp_holistic.HandLandmark.INDEX_FINGER_TIP].y
     ) < PINCH_THRESHOLD
 
-    # All 4 fingers extended
     fingers_extended = all([
         is_finger_extended(mp_holistic.HandLandmark.INDEX_FINGER_TIP, mp_holistic.HandLandmark.INDEX_FINGER_PIP),
         is_finger_extended(mp_holistic.HandLandmark.MIDDLE_FINGER_TIP, mp_holistic.HandLandmark.MIDDLE_FINGER_PIP),
@@ -86,7 +83,6 @@ def get_gesture_state(hand_landmarks):
         is_finger_extended(mp_holistic.HandLandmark.PINKY_TIP, mp_holistic.HandLandmark.PINKY_MCP)
     ])
 
-    # All 4 fingers curled
     fingers_curled = all([
         is_finger_curled(mp_holistic.HandLandmark.INDEX_FINGER_TIP, mp_holistic.HandLandmark.INDEX_FINGER_MCP),
         is_finger_curled(mp_holistic.HandLandmark.MIDDLE_FINGER_TIP, mp_holistic.HandLandmark.MIDDLE_FINGER_MCP),
@@ -94,7 +90,6 @@ def get_gesture_state(hand_landmarks):
         is_finger_curled(mp_holistic.HandLandmark.PINKY_TIP, mp_holistic.HandLandmark.PINKY_MCP)
     ])
     
-    # Peace Sign
     is_peace_val = (
         is_finger_extended(mp_holistic.HandLandmark.INDEX_FINGER_TIP, mp_holistic.HandLandmark.INDEX_FINGER_PIP) and
         is_finger_extended(mp_holistic.HandLandmark.MIDDLE_FINGER_TIP, mp_holistic.HandLandmark.MIDDLE_FINGER_PIP) and
@@ -120,19 +115,17 @@ def get_buffer(name, shape, dtype=np.uint8):
     if buffer is None or buffer.shape != shape or buffer.dtype != dtype:
         EFFECT_BUFFERS[name] = np.zeros(shape, dtype=dtype)
     else:
-        EFFECT_BUFFERS[name][:] = 0 # Clear existing buffer for a fresh canvas
+        EFFECT_BUFFERS[name][:] = 0
     return EFFECT_BUFFERS[name]
 
 # --- Physics Sandbox ---
 def spawn_physics_object(shape='circle', image_data=None):
-    """Spawns a physics object, which can be a standard shape or a custom image."""
     if len(physics_objects) >= MAX_PHYSICS_OBJECTS:
-        physics_objects.pop(0) # Remove oldest object
+        physics_objects.pop(0)
 
     x = random.randint(100, 1180)
     color = (random.randint(100, 255), random.randint(100, 255), random.randint(100, 255))
     
-    # Base object properties
     obj = {'pos': np.array([float(x), 50.0]), 
            'prev_pos': np.array([float(x), 50.0]),
            'vel': np.array([random.uniform(-2, 2), 0.0]), 
@@ -141,13 +134,10 @@ def spawn_physics_object(shape='circle', image_data=None):
            'held_by': None,
            'image': None}
 
-    # Set properties based on whether it's an image or a shape
     if shape == 'image' and image_data is not None:
         obj['image'] = image_data
-        # Use the largest dimension for collision size
         obj['size'] = max(image_data.shape[0], image_data.shape[1]) // 2
     else:
-        # Default size for geometric shapes
         obj['size'] = random.randint(20, 40)
         
     physics_objects.append(obj)
@@ -214,7 +204,6 @@ def update_and_draw_physics(image, results, gestures):
         obj['prev_pos'] = obj['pos'].copy()
         pos_int = obj['pos'].astype(np.int32)
         
-        # --- Drawing Logic ---
         shape_drawers = {
             'circle': lambda: cv2.circle(image, tuple(pos_int), obj['size'], obj['color'], -1),
             'square': lambda: cv2.rectangle(image, (pos_int[0]-obj['size'], pos_int[1]-obj['size']), (pos_int[0]+obj['size'], pos_int[1]+obj['size']), obj['color'], -1),
@@ -229,31 +218,39 @@ def update_and_draw_physics(image, results, gestures):
             s_outer, s_inner = obj['size'], obj['size'] // 2
             points = np.array([[int(pos_int[0] + (s_outer if i%2==0 else s_inner) * math.cos(i*math.pi/5 - math.pi/2)), int(pos_int[1] + (s_outer if i%2==0 else s_inner) * math.sin(i*math.pi/5 - math.pi/2))] for i in range(10)], np.int32)
             cv2.fillPoly(image, [points], obj['color'])
-        # --- NEW: Drawing logic for image objects ---
         elif obj['shape'] == 'image' and obj.get('image') is not None:
             img_to_draw = obj['image']
             img_h, img_w, _ = img_to_draw.shape
             
-            # Calculate top-left corner for overlay
             x1, y1 = pos_int[0] - img_w // 2, pos_int[1] - img_h // 2
             x2, y2 = x1 + img_w, y1 + img_h
 
-            # Ensure the object is on screen before trying to draw
             if x1 < w and y1 < h and x2 > 0 and y2 > 0:
-                # Get the region of interest (ROI) on the main image
                 roi = image[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
                 
-                # Handle alpha channel for transparency
                 alpha = img_to_draw[:, :, 3] / 255.0
-                alpha = alpha[:roi.shape[0], :roi.shape[1]] # Match alpha size to ROI
+                alpha = alpha[:roi.shape[0], :roi.shape[1]]
                 
-                # Combine the logo and the ROI
                 for c in range(0, 3):
                     img_c = img_to_draw[:roi.shape[0], :roi.shape[1], c]
                     roi[:, :, c] = (img_c * alpha) + (roi[:, :, c] * (1.0 - alpha))
 
 
 # --- Effects Functions ---
+def apply_thermal_vision_effect(image):
+    """Applies a thermal vision effect to the entire image."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # --- MODIFIED: Changed the colormap to JET ---
+    # You can experiment with other colormaps like:
+    # cv2.COLORMAP_HOT, cv2.COLORMAP_PLASMA, cv2.COLORMAP_LAVA
+    thermal = cv2.applyColorMap(gray, cv2.COLORMAP_JET)
+    
+    # Blend the thermal image with the original to retain some detail
+    superimposed_img = cv2.addWeighted(thermal, 0.6, image, 0.4, 0)
+    
+    return superimposed_img
+
 def draw_geometric_orb_effect(image, hand_landmarks):
     if not hand_landmarks: return
     orb_glow_buffer = get_buffer("orb_glow", image.shape)
@@ -330,8 +327,9 @@ def draw_and_handle_face_ui(image, results, gestures):
     h, w, _ = image.shape
     face_buttons[0]["center"] = (int(results.face_landmarks.landmark[234].x * w) - 80, int(results.face_landmarks.landmark[234].y * h))
     face_buttons[1]["center"] = (int(results.face_landmarks.landmark[454].x * w) + 80, int(results.face_landmarks.landmark[454].y * h))
-    face_buttons[2]["center"] = (int(results.face_landmarks.landmark[17].x * w), int(results.face_landmarks.landmark[17].y * h) + 80)
-    
+    face_buttons[2]["center"] = (int(results.face_landmarks.landmark[152].x * w), int(results.face_landmarks.landmark[152].y * h) + 60)
+    face_buttons[3]["center"] = (int(results.face_landmarks.landmark[10].x * w), int(results.face_landmarks.landmark[10].y * h) - 60)
+
     if click_cooldown == 0:
         for hand_name in ['left', 'right']:
             if gestures[hand_name]["is_pinching"]:
@@ -404,7 +402,6 @@ def draw_and_handle_fist_arc_menu(image, hand_landmarks, gestures):
         if i == highlighted_dial_option: cv2.circle(image, (opt_x, opt_y), 15, (255, 255, 0), -1)
         cv2.circle(image, (opt_x, opt_y), 10, color, -1)
         
-        # Logic to draw text labels next to the options
         text_radius = arc_radius + 45
         angle_rad = math.radians(option_data[i]['angle_deg'])
         text_x = int(anchor_x + text_radius * math.cos(angle_rad))
@@ -436,7 +433,6 @@ def main():
     cv2.namedWindow('Interactive Gesture Control', cv2.WINDOW_NORMAL)
     cv2.setWindowProperty('Interactive Gesture Control', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-    # --- NEW: Pre-load and resize all logo images efficiently ---
     print("Loading logo images...")
     for i in range(1, 9):
         try:
@@ -445,10 +441,8 @@ def main():
             if logo is None:
                 raise FileNotFoundError(f"Image not found at {logo_path}")
             if logo.shape[2] != 4:
-                print(f"Warning: logo_{i}.png does not have an alpha channel. Adding one.")
                 logo = cv2.cvtColor(logo, cv2.COLOR_BGR2BGRA)
 
-            # Resize while preserving aspect ratio
             h, w = logo.shape[:2]
             scale = MAX_LOGO_DIMENSION /  max(h, w)
             new_w, new_h = int(w * scale), int(h * scale)
@@ -458,7 +452,7 @@ def main():
             print(f"-> Successfully loaded and resized logo_{i}.png")
         except Exception as e:
             print(f"Warning: Could not load 'logo_{i}.png'. {e}")
-            LOGO_IMAGES.append(None) # Append placeholder if load fails
+            LOGO_IMAGES.append(None)
     
     try:
         logo = cv2.imread('logo.png', cv2.IMREAD_UNCHANGED)
@@ -479,46 +473,46 @@ def main():
             frame_count += 1
             if click_cooldown > 0: click_cooldown -= 1
 
-            # --- Core Processing ---
             flipped_frame = cv2.flip(frame, 1)
             rgb_frame = cv2.cvtColor(flipped_frame, cv2.COLOR_BGR2RGB)
-            rgb_frame.flags.writeable = False # Performance boost
+            rgb_frame.flags.writeable = False
             results = holistic_model.process(rgb_frame)
             display_image = flipped_frame.copy()
 
-            # --- Gesture Recognition (Once per frame) ---
             gestures = {
                 "left": get_gesture_state(results.left_hand_landmarks),
                 "right": get_gesture_state(results.right_hand_landmarks)
             }
 
-            # --- Effects Rendering ---
             special_effect_active = gestures["left"]["is_peace"] and gestures["right"]["is_peace"]
             if special_effect_active:
                 display_image = apply_dream_sequence_effect(display_image, results)
             else:
-                if face_buttons[0]["is_on"]: display_image = apply_cartoon_effect(display_image)
-                if face_buttons[1]["is_on"]: display_image = apply_ascii_art_effect(display_image)
-                
-                if face_buttons[2]["is_on"]:
-                    ghosting_trail = EFFECT_BUFFERS.get("ghosting_trail")
-                    if ghosting_trail is None or ghosting_trail.shape != display_image.shape:
-                        EFFECT_BUFFERS["ghosting_trail"] = display_image.astype(np.float32)
-                    else:
-                        current_frame_float = display_image.astype(np.float32)
-                        EFFECT_BUFFERS["ghosting_trail"] = cv2.addWeighted(current_frame_float, 0.1, ghosting_trail, 0.9, 0)
-                    display_image = EFFECT_BUFFERS["ghosting_trail"].astype(np.uint8)
+                if face_buttons[3]["is_on"]:
+                    display_image = apply_thermal_vision_effect(display_image)
                 else:
-                    EFFECT_BUFFERS["ghosting_trail"] = None
+                    if face_buttons[0]["is_on"]: display_image = apply_cartoon_effect(display_image)
+                    if face_buttons[1]["is_on"]: display_image = apply_ascii_art_effect(display_image)
+                    
+                    if face_buttons[2]["is_on"]:
+                        ghosting_trail = EFFECT_BUFFERS.get("ghosting_trail")
+                        if ghosting_trail is None or ghosting_trail.shape != display_image.shape:
+                            EFFECT_BUFFERS["ghosting_trail"] = display_image.astype(np.float32)
+                        else:
+                            current_frame_float = display_image.astype(np.float32)
+                            EFFECT_BUFFERS["ghosting_trail"] = cv2.addWeighted(current_frame_float, 0.1, ghosting_trail, 0.9, 0)
+                        display_image = EFFECT_BUFFERS["ghosting_trail"].astype(np.uint8)
+                    else:
+                        EFFECT_BUFFERS["ghosting_trail"] = None
 
-            # --- Physics & UI Rendering ---
             update_and_draw_physics(display_image, results, gestures)
             
             if not special_effect_active:
                 if gestures["left"]["is_thumb_to_palm"]: draw_geometric_orb_effect(display_image, results.left_hand_landmarks)
                 if gestures["right"]["is_thumb_to_palm"]: draw_geometric_orb_effect(display_image, results.right_hand_landmarks)
                 if results.right_hand_landmarks: draw_and_handle_fist_arc_menu(display_image, results.right_hand_landmarks, gestures)
-                draw_all_landmarks(display_image, results)
+                if not face_buttons[3]["is_on"]:
+                    draw_all_landmarks(display_image, results)
             
             draw_and_handle_face_ui(display_image, results, gestures)
             
@@ -531,7 +525,6 @@ def main():
                     for c in range(0,3):
                         roi[:,:,c] = logo_resized[:,:,c] * alpha + roi[:,:,c] * (1.0 - alpha)
 
-            # --- UPDATED: Text with Outline ---
             text_to_display = "PRESS: b/s/t/x/1-8: spawn | c: clear | q: quit"
             font, font_scale, font_thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2
             outline_thickness, text_color, outline_color = 4, (255, 255, 255), (0, 0, 0)
@@ -541,7 +534,6 @@ def main():
 
             cv2.imshow('Interactive Gesture Control', display_image)
             
-            # --- Input Handling & Cleanup ---
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'): break
             elif key == ord('b'): spawn_physics_object('circle')
@@ -549,7 +541,6 @@ def main():
             elif key == ord('t'): spawn_physics_object('triangle')
             elif key == ord('x'): spawn_physics_object('star')
             elif key == ord('c'): physics_objects.clear()
-            # --- NEW: Handle number keys for spawning logos ---
             elif ord('1') <= key <= ord('8'):
                 logo_index = key - ord('1')
                 if logo_index < len(LOGO_IMAGES) and LOGO_IMAGES[logo_index] is not None:
